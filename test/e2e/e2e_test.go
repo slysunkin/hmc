@@ -261,6 +261,45 @@ var _ = Describe("controller", Ordered, func() {
 					time.Second).Should(Succeed())
 			*/
 		})
+
+		It("should work with an EKS provider", func() {
+			// Deploy a standalone cluster and verify it is running/ready.
+			GinkgoT().Setenv(managedcluster.EnvVarAWSInstanceType, "t3.small")
+			GinkgoT().Setenv(managedcluster.EnvVarAWSSSHKeyName, "slysunkin")
+
+			templateBy(managedcluster.TemplateEKSCP, "creating a ManagedCluster for EKS")
+			sd := managedcluster.GetUnstructured(managedcluster.TemplateEKSCP)
+			clusterName = sd.GetName()
+
+			standaloneDeleteFunc = kc.CreateManagedCluster(context.Background(), sd)
+
+			templateBy(managedcluster.TemplateEKSCP, "waiting for infrastructure to deploy successfully")
+			deploymentValidator := managedcluster.NewProviderValidator(
+				managedcluster.TemplateEKSCP,
+				clusterName,
+				managedcluster.ValidationActionDeploy,
+			)
+
+			Eventually(func() error {
+				return deploymentValidator.Validate(context.Background(), kc)
+			}).WithTimeout(60 * time.Minute).WithPolling(30 * time.Second).Should(Succeed())
+
+			// --- clean up ---
+			/*
+				templateBy(managedcluster.TemplateAWSStandaloneCP, "deleting the ManagedCluster for EKS")
+				Expect(standaloneDeleteFunc()).NotTo(HaveOccurred())
+
+				deletionValidator := managedcluster.NewProviderValidator(
+					managedcluster.TemplateAWSStandaloneCP,
+					clusterName,
+					managedcluster.ValidationActionDelete,
+				)
+				Eventually(func() error {
+					return deletionValidator.Validate(context.Background(), kc)
+				}).WithTimeout(10 * time.Minute).WithPolling(10 *
+					time.Second).Should(Succeed())
+			*/
+		})
 	})
 
 	Context("vSphere templates", func() {
@@ -559,8 +598,10 @@ func collectLogArtifacts(kc *kubeclient.KubeClient, clusterName string, provider
 		"describe", "cluster", clusterName, "--namespace", namespace, "--show-conditions=all")
 	output, err := utils.Run(cmd)
 	if err != nil {
-		utils.WarnError(fmt.Errorf("failed to get clusterctl log: %w", err))
-		return
+		if !strings.Contains(err.Error(), "unable to verify clusterctl version") {
+			utils.WarnError(fmt.Errorf("failed to get clusterctl log: %w", err))
+			return
+		}
 	}
 
 	err = os.WriteFile(filepath.Join("test/e2e", host+"-"+"clusterctl.log"), output, 0o644)

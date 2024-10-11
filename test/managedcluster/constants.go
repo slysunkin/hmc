@@ -34,4 +34,5 @@ const (
 	EnvVarAWSSecurityGroupID        = "AWS_SG_ID"
 	EnvVarPublicIP                  = "AWS_PUBLIC_IP"
 	AWSCredentialsSecretName        = "aws-variables"
+	EnvVarAWSSSHKeyName             = "AWS_SSH_KEY_NAME"
 )

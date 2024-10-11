@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/strings/slices"
 )
 
 // Run executes the provided command within this context and returns it's
@@ -109,7 +110,7 @@ func GetProjectDir() (string, error) {
 // ValidateConditionsTrue iterates over the conditions of the given
 // unstructured object and returns an error if any of the conditions are not
 // true.  Conditions are expected to be of type metav1.Condition.
-func ValidateConditionsTrue(unstrObj *unstructured.Unstructured) error {
+func ValidateConditionsTrue(unstrObj *unstructured.Unstructured, excludedConditions []string) error {
 	objKind, objName := ObjKindName(unstrObj)
 
 	conditions, err := GetConditionsFromUnstructured(unstrObj)
@@ -121,6 +122,10 @@ func ValidateConditionsTrue(unstrObj *unstructured.Unstructured) error {
 
 	for _, c := range conditions {
 		if c.Status == metav1.ConditionTrue {
+			continue
+		}
+
+		if slices.Contains(excludedConditions, c.Type) {
 			continue
 		}
 
