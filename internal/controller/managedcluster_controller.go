@@ -49,6 +49,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 
@@ -443,6 +444,15 @@ func (r *ManagedClusterReconciler) updateStatus(ctx context.Context, managedClus
 	managedCluster.Status.ObservedGeneration = managedCluster.Generation
 	warnings := ""
 	errs := ""
+
+	machinesReady, err := r.checkObjectsConditions(ctx, managedCluster.Namespace, managedCluster.Name, gvkMachine)
+	if err != nil {
+		errs += err.Error() + ". "
+	}
+	if !machinesReady {
+		errs += "Machines are not ready. "
+	}
+
 	for _, condition := range managedCluster.Status.Conditions {
 		if condition.Type == hmc.ReadyCondition {
 			continue
@@ -632,6 +642,67 @@ func (r *ManagedClusterReconciler) objectsAvailable(ctx context.Context, namespa
 		return false, err
 	}
 	return len(itemsList.Items) != 0, nil
+}
+
+func (r *ManagedClusterReconciler) checkObjectsConditions(ctx context.Context, namespace, clusterName string, gvk schema.GroupVersionKind) (bool, error) {
+	opts := &client.ListOptions{
+		LabelSelector: labels.SelectorFromSet(map[string]string{hmc.ClusterNameLabelKey: clusterName}),
+		Namespace:     namespace,
+	}
+	itemsList := &unstructured.UnstructuredList{}
+	itemsList.SetGroupVersionKind(gvk)
+	if err := r.Client.List(ctx, itemsList, opts); err != nil {
+		return false, err
+	}
+
+	conditions := true
+	for _, item := range itemsList.Items {
+		complete, err := allConditionsComplete(item.Object, gvk.Kind, item.GetName(), namespace)
+		if err != nil {
+			return false, err
+		}
+		log.FromContext(ctx).Info(fmt.Sprintf("### %+v %t", item.Object, complete))
+		conditions = conditions && complete
+	}
+
+	log.FromContext(ctx).Info(fmt.Sprintf("### %t", conditions))
+
+	return conditions, nil
+}
+
+func allConditionsComplete(obj map[string]interface{}, objectType, name, namespace string) (bool, error) {
+	conditions, found, err := unstructured.NestedSlice(obj, "status", "conditions")
+	if err != nil {
+		return true, fmt.Errorf("failed to get cluster information for %s %s in namespace: %s: %w",
+			objectType, namespace, name, err)
+	}
+	if !found {
+		return true, fmt.Errorf("failed to get cluster information for %s %s in namespace: %s: status.conditions not found",
+			objectType, namespace, name)
+	}
+
+	allConditionsComplete := true
+	for _, condition := range conditions {
+		conditionMap, ok := condition.(map[string]any)
+		if !ok {
+			return true, fmt.Errorf("failed to cast condition to map[string]any for %s: %s in namespace: %s: %w",
+				objectType, namespace, name, err)
+		}
+
+		var metaCondition metav1.Condition
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(conditionMap, &metaCondition); err != nil {
+			return true, fmt.Errorf("failed to convert unstructured conditions to metav1.Condition for %s %s in namespace: %s: %w",
+				objectType, namespace, name, err)
+		}
+
+		if metaCondition.Status != "True" {
+			allConditionsComplete = false
+			// no need to check the rest of conditions
+			break
+		}
+	}
+
+	return allConditionsComplete, nil
 }
 
 func (r *ManagedClusterReconciler) reconcileCredentialPropagation(ctx context.Context, managedCluster *hmc.ManagedCluster) (ctrl.Result, error) {
