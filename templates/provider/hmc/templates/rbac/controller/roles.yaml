@@ -21,6 +21,11 @@ rules:
   - clusters
   verbs: {{ include "rbac.viewerVerbs" . | nindent 4 }}
 - apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - machinedeployments
+  verbs: {{ include "rbac.viewerVerbs" . | nindent 4 }}
+- apiGroups:
   - helm.toolkit.fluxcd.io
   resources:
   - helmreleases
@@ -184,7 +189,13 @@ rules:
   resources:
   - profiles
   - clusterprofiles
+  - clustersummaries
   verbs: {{ include "rbac.editorVerbs" . | nindent 4 }}
+- apiGroups:
+  - controlplane.cluster.x-k8s.io
+  resources:
+  - awsmanagedcontrolplanes
+  verbs: {{ include "rbac.viewerVerbs" . | nindent 4 }}
 - apiGroups:
   - hmc.mirantis.com
   resources:

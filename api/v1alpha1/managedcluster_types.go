@@ -37,11 +37,6 @@ const (
 const (
 	// ManagedClusterKind is the string representation of a ManagedCluster.
 	ManagedClusterKind = "ManagedCluster"
-
-	// CredentialReadyCondition indicates if referenced Credential exists and has Ready state
-	CredentialReadyCondition = "CredentialReady"
-	// CredentialPropagatedCondition indicates that CCM credentials were delivered to managed cluster
-	CredentialsPropagatedCondition = "CredentialsApplied"
 	// TemplateReadyCondition indicates the referenced Template exists and valid.
 	TemplateReadyCondition = "TemplateReady"
 	// HelmChartReadyCondition indicates the corresponding HelmChart is valid and ready.
@@ -92,6 +87,8 @@ type ManagedClusterSpec struct {
 
 // ManagedClusterStatus defines the observed state of ManagedCluster
 type ManagedClusterStatus struct {
+	// Services contains details for the state of services.
+	Services []ServiceStatus `json:"services,omitempty"`
 	// Currently compatible exact Kubernetes version of the cluster. Being set only if
 	// provided by the corresponding ClusterTemplate.
 	KubernetesVersion string `json:"k8sVersion,omitempty"`

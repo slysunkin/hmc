@@ -64,19 +64,23 @@ func (v *ManagedClusterValidator) ValidateCreate(ctx context.Context, obj runtim
 
 	template, err := v.getManagedClusterTemplate(ctx, managedCluster.Namespace, managedCluster.Spec.Template)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %v", invalidManagedClusterMsg, err)
+		return nil, fmt.Errorf("%s: %w", invalidManagedClusterMsg, err)
 	}
 
-	if err := isTemplateValid(template); err != nil {
-		return nil, fmt.Errorf("%s: %v", invalidManagedClusterMsg, err)
+	if err := isTemplateValid(template.GetCommonStatus()); err != nil {
+		return nil, fmt.Errorf("%s: %w", invalidManagedClusterMsg, err)
 	}
 
 	if err := validateK8sCompatibility(ctx, v.Client, template, managedCluster); err != nil {
-		return admission.Warnings{"Failed to validate k8s version compatibility with ServiceTemplates"}, fmt.Errorf("failed to validate k8s compatibility: %v", err)
+		return admission.Warnings{"Failed to validate k8s version compatibility with ServiceTemplates"}, fmt.Errorf("failed to validate k8s compatibility: %w", err)
 	}
 
 	if err := v.validateCredential(ctx, managedCluster, template); err != nil {
-		return nil, fmt.Errorf("%s: %v", invalidManagedClusterMsg, err)
+		return nil, fmt.Errorf("%s: %w", invalidManagedClusterMsg, err)
+	}
+
+	if err := validateServices(ctx, v.Client, managedCluster.Namespace, managedCluster.Spec.Services); err != nil {
+		return nil, fmt.Errorf("%s: %w", invalidManagedClusterMsg, err)
 	}
 
 	return nil, nil
@@ -97,7 +101,7 @@ func (v *ManagedClusterValidator) ValidateUpdate(ctx context.Context, oldObj, ne
 
 	template, err := v.getManagedClusterTemplate(ctx, newManagedCluster.Namespace, newTemplate)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %v", invalidManagedClusterMsg, err)
+		return nil, fmt.Errorf("%s: %w", invalidManagedClusterMsg, err)
 	}
 
 	if oldTemplate != newTemplate {
@@ -106,17 +110,21 @@ func (v *ManagedClusterValidator) ValidateUpdate(ctx context.Context, oldObj, ne
 			return admission.Warnings{msg}, errClusterUpgradeForbidden
 		}
 
-		if err := isTemplateValid(template); err != nil {
-			return nil, fmt.Errorf("%s: %v", invalidManagedClusterMsg, err)
+		if err := isTemplateValid(template.GetCommonStatus()); err != nil {
+			return nil, fmt.Errorf("%s: %w", invalidManagedClusterMsg, err)
 		}
 
 		if err := validateK8sCompatibility(ctx, v.Client, template, newManagedCluster); err != nil {
-			return admission.Warnings{"Failed to validate k8s version compatibility with ServiceTemplates"}, fmt.Errorf("failed to validate k8s compatibility: %v", err)
+			return admission.Warnings{"Failed to validate k8s version compatibility with ServiceTemplates"}, fmt.Errorf("failed to validate k8s compatibility: %w", err)
 		}
 	}
 
 	if err := v.validateCredential(ctx, newManagedCluster, template); err != nil {
-		return nil, fmt.Errorf("%s: %v", invalidManagedClusterMsg, err)
+		return nil, fmt.Errorf("%s: %w", invalidManagedClusterMsg, err)
+	}
+
+	if err := validateServices(ctx, v.Client, newManagedCluster.Namespace, newManagedCluster.Spec.Services); err != nil {
+		return nil, fmt.Errorf("%s: %w", invalidManagedClusterMsg, err)
 	}
 
 	return nil, nil
@@ -182,11 +190,11 @@ func (v *ManagedClusterValidator) Default(ctx context.Context, obj runtime.Objec
 
 	template, err := v.getManagedClusterTemplate(ctx, managedCluster.Namespace, managedCluster.Spec.Template)
 	if err != nil {
-		return fmt.Errorf("could not get template for the managedcluster: %v", err)
+		return fmt.Errorf("could not get template for the managedcluster: %w", err)
 	}
 
-	if err := isTemplateValid(template); err != nil {
-		return fmt.Errorf("template is invalid: %v", err)
+	if err := isTemplateValid(template.GetCommonStatus()); err != nil {
+		return fmt.Errorf("template is invalid: %w", err)
 	}
 
 	if template.Status.Config == nil {
@@ -216,9 +224,9 @@ func (v *ManagedClusterValidator) getManagedClusterCredential(ctx context.Contex
 	return cred, nil
 }
 
-func isTemplateValid(template *hmcv1alpha1.ClusterTemplate) error {
-	if !template.Status.Valid {
-		return fmt.Errorf("the template is not valid: %s", template.Status.ValidationError)
+func isTemplateValid(status *hmcv1alpha1.TemplateStatusCommon) error {
+	if !status.Valid {
+		return fmt.Errorf("the template is not valid: %s", status.ValidationError)
 	}
 
 	return nil
@@ -246,7 +254,7 @@ func (v *ManagedClusterValidator) validateCredential(ctx context.Context, manage
 		return err
 	}
 
-	if cred.Status.State != hmcv1alpha1.CredentialReady {
+	if !cred.Status.Ready {
 		return errors.New("credential is not Ready")
 	}
 

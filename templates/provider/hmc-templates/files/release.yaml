@@ -1,23 +1,23 @@
 apiVersion: hmc.mirantis.com/v1alpha1
 kind: Release
 metadata:
-  name: hmc-0-0-3
+  name: hmc-0-0-4
   annotations:
     helm.sh/resource-policy: keep
 spec:
-  version: 0.0.3
+  version: 0.0.4
   hmc:
-    template: hmc-0-0-3
+    template: hmc-0-0-4
   capi:
-    template: cluster-api-0-0-2
+    template: cluster-api-0-0-3
   providers:
     - name: k0smotron
-      template: k0smotron-0-0-2
+      template: k0smotron-0-0-3
     - name: cluster-api-provider-azure
-      template: cluster-api-provider-azure-0-0-2
+      template: cluster-api-provider-azure-0-0-3
     - name: cluster-api-provider-vsphere
-      template: cluster-api-provider-vsphere-0-0-2
+      template: cluster-api-provider-vsphere-0-0-3
     - name: cluster-api-provider-aws
-      template: cluster-api-provider-aws-0-0-2
+      template: cluster-api-provider-aws-0-0-3
     - name: projectsveltos
-      template: projectsveltos-0-41-1
+      template: projectsveltos-0-42-0

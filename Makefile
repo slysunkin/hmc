@@ -119,7 +119,7 @@ test-e2e: cli-install
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint
-	@$(GOLANGCI_LINT) run
+	@$(GOLANGCI_LINT) run --timeout=$(GOLANGCI_LINT_TIMEOUT)
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
@@ -129,20 +129,34 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 add-license: addlicense
 	$(ADDLICENSE) -c "" -ignore ".github/**" -ignore "config/**" -ignore "templates/**" -ignore ".*" -y 2024 .
 
-##@ Build
+##@ Package
 
 TEMPLATES_DIR := templates
 PROVIDER_TEMPLATES_DIR := $(TEMPLATES_DIR)/provider
 CHARTS_PACKAGE_DIR ?= $(LOCALBIN)/charts
+EXTENSION_CHARTS_PACKAGE_DIR ?= $(LOCALBIN)/charts/extensions
+$(EXTENSION_CHARTS_PACKAGE_DIR): | $(LOCALBIN)
+	mkdir -p $(EXTENSION_CHARTS_PACKAGE_DIR)
 $(CHARTS_PACKAGE_DIR): | $(LOCALBIN)
 	rm -rf $(CHARTS_PACKAGE_DIR)
 	mkdir -p $(CHARTS_PACKAGE_DIR)
+IMAGES_PACKAGE_DIR ?= $(LOCALBIN)/images
+$(IMAGES_PACKAGE_DIR): | $(LOCALBIN)
+	rm -rf $(IMAGES_PACKAGE_DIR)
+	mkdir -p $(IMAGES_PACKAGE_DIR)
 
 TEMPLATE_FOLDERS = $(patsubst $(TEMPLATES_DIR)/%,%,$(wildcard $(TEMPLATES_DIR)/*))
 
 .PHONY: helm-package
-helm-package: $(CHARTS_PACKAGE_DIR) helm
+helm-package: $(CHARTS_PACKAGE_DIR) $(EXTENSION_CHARTS_PACKAGE_DIR) helm
 	@make $(patsubst %,package-%-tmpl,$(TEMPLATE_FOLDERS))
+
+bundle-images: dev-apply $(IMAGES_PACKAGE_DIR) ## Create a tarball with all images used by HMC.
+	@BUNDLE_TARBALL=$(IMAGES_PACKAGE_DIR)/hmc-images-$(VERSION).tgz EXTENSIONS_BUNDLE_TARBALL=$(IMAGES_PACKAGE_DIR)/hmc-extension-images-$(VERSION).tgz IMG=$(IMG) KUBECTL=$(KUBECTL) YQ=$(YQ) HELM=$(HELM) NAMESPACE=$(NAMESPACE) TEMPLATES_DIR=$(TEMPLATES_DIR) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) $(SHELL) $(CURDIR)/scripts/bundle-images.sh
+
+airgap-package: bundle-images ## Create a tarball with all images and Helm charts used by HMC, useful for deploying in air-gapped environments.
+	@TEMPLATES_DIR=$(TEMPLATES_DIR) EXTENSION_CHARTS_PACKAGE_DIR=$(EXTENSION_CHARTS_PACKAGE_DIR) HELM=$(HELM) YQ=$(YQ) $(SHELL) $(CURDIR)/scripts/package-k0s-extensions-helm.sh
+	cd $(LOCALBIN) && mkdir -p scripts && cp ../scripts/airgap-push.sh scripts/airgap-push.sh && tar -czf hmc-airgap-$(VERSION).tgz scripts/airgap-push.sh $(shell basename $(CHARTS_PACKAGE_DIR)) $(shell basename $(IMAGES_PACKAGE_DIR))
 
 package-%-tmpl:
 	@make TEMPLATES_SUBDIR=$(TEMPLATES_DIR)/$* $(patsubst %,package-chart-%,$(shell ls $(TEMPLATES_DIR)/$*))
@@ -153,6 +167,8 @@ lint-chart-%:
 
 package-chart-%: lint-chart-%
 	$(HELM) package --destination $(CHARTS_PACKAGE_DIR) $(TEMPLATES_SUBDIR)/$*
+
+##@ Build
 
 LD_FLAGS?= -s -w
 LD_FLAGS += -X github.com/Mirantis/hmc/internal/build.Version=$(VERSION)
@@ -349,11 +365,11 @@ dev-creds-apply: dev-$(DEV_PROVIDER)-creds
 
 .PHONY: dev-aws-nuke
 dev-aws-nuke: envsubst awscli yq cloud-nuke ## Warning: Destructive! Nuke all AWS resources deployed by 'DEV_PROVIDER=aws dev-mcluster-apply'
-	@CLUSTER_NAME=$(CLUSTER_NAME) YQ=$(YQ) AWSCLI=$(AWSCLI) bash -c "./scripts/aws-nuke-ccm.sh elb"
+	@CLUSTER_NAME=$(CLUSTER_NAME) YQ=$(YQ) AWSCLI=$(AWSCLI) $(SHELL) $(CURDIR)/scripts/aws-nuke-ccm.sh elb
 	@CLUSTER_NAME=$(CLUSTER_NAME) $(ENVSUBST) < config/dev/aws-cloud-nuke.yaml.tpl > config/dev/aws-cloud-nuke.yaml
 	DISABLE_TELEMETRY=true $(CLOUDNUKE) aws --region $$AWS_REGION --force --config config/dev/aws-cloud-nuke.yaml --resource-type vpc,eip,nat-gateway,ec2,ec2-subnet,elb,elbv2,ebs,internet-gateway,network-interface,security-group
 	@rm config/dev/aws-cloud-nuke.yaml
-	@CLUSTER_NAME=$(CLUSTER_NAME) YQ=$(YQ) AWSCLI=$(AWSCLI) bash -c "./scripts/aws-nuke-ccm.sh ebs"
+	@CLUSTER_NAME=$(CLUSTER_NAME) YQ=$(YQ) AWSCLI=$(AWSCLI) $(SHELL) $(CURDIR)/scripts/aws-nuke-ccm.sh ebs
 
 .PHONY: dev-azure-nuke
 dev-azure-nuke: envsubst azure-nuke ## Warning: Destructive! Nuke all Azure resources deployed by 'DEV_PROVIDER=azure dev-mcluster-apply'
@@ -413,6 +429,7 @@ AWSCLI ?= $(LOCALBIN)/aws
 CONTROLLER_TOOLS_VERSION ?= v0.16.3
 ENVTEST_VERSION ?= release-0.17
 GOLANGCI_LINT_VERSION ?= v1.61.0
+GOLANGCI_LINT_TIMEOUT ?= 1m
 HELM_VERSION ?= v3.15.1
 KIND_VERSION ?= v0.23.0
 YQ_VERSION ?= v4.44.2
@@ -528,7 +545,6 @@ $(AWSCLI): | $(LOCALBIN)
 		echo "Installing to $(LOCALBIN) on Windows is not yet implemented" && \
 		exit 1; \
 	fi; \
-
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary (ideally with version)

@@ -32,6 +32,7 @@ import (
 	. "github.com/onsi/gomega"
 	sveltosv1beta1 "github.com/projectsveltos/addon-controller/api/v1beta1"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	utilyaml "sigs.k8s.io/cluster-api/util/yaml"
@@ -53,15 +54,17 @@ import (
 const (
 	mutatingWebhookKind   = "MutatingWebhookConfiguration"
 	validatingWebhookKind = "ValidatingWebhookConfiguration"
+	testSystemNamespace   = "test-system-namespace"
 )
 
 var (
-	cfg       *rest.Config
-	k8sClient client.Client
-	mgrClient client.Client
-	testEnv   *envtest.Environment
-	ctx       context.Context
-	cancel    context.CancelFunc
+	cfg           *rest.Config
+	k8sClient     client.Client
+	dynamicClient *dynamic.DynamicClient
+	mgrClient     client.Client
+	testEnv       *envtest.Environment
+	ctx           context.Context
+	cancel        context.CancelFunc
 )
 
 func TestControllers(t *testing.T) {
@@ -122,6 +125,10 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
 
+	dynamicClient, err = dynamic.NewForConfig(cfg)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(k8sClient).NotTo(BeNil())
+
 	// start webhook server using Manager
 	webhookInstallOptions := &testEnv.WebhookInstallOptions
 
@@ -137,11 +144,15 @@ var _ = BeforeSuite(func() {
 	})
 	Expect(err).NotTo(HaveOccurred())
 	mgrClient = mgr.GetClient()
+	Expect(mgrClient).NotTo(BeNil())
 
 	err = hmcmirantiscomv1alpha1.SetupIndexers(ctx, mgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	err = (&hmcwebhook.ManagedClusterValidator{}).SetupWebhookWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+
+	err = (&hmcwebhook.MultiClusterServiceValidator{SystemNamespace: testSystemNamespace}).SetupWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	err = (&hmcwebhook.ManagementValidator{}).SetupWebhookWithManager(mgr)
@@ -159,7 +170,7 @@ var _ = BeforeSuite(func() {
 	err = (&hmcwebhook.ClusterTemplateValidator{}).SetupWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
-	err = (&hmcwebhook.ServiceTemplateValidator{}).SetupWebhookWithManager(mgr)
+	err = (&hmcwebhook.ServiceTemplateValidator{SystemNamespace: testSystemNamespace}).SetupWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	err = (&hmcwebhook.ProviderTemplateValidator{}).SetupWebhookWithManager(mgr)

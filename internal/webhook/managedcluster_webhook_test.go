@@ -51,7 +51,7 @@ var (
 
 	cred = credential.NewCredential(
 		credential.WithName(testCredentialName),
-		credential.WithState(v1alpha1.CredentialReady),
+		credential.WithReady(true),
 		credential.WithIdentityRef(
 			&corev1.ObjectReference{
 				Kind: "AWSClusterStaticIdentity",
@@ -98,6 +98,32 @@ func TestManagedClusterValidateCreate(t *testing.T) {
 			err: fmt.Sprintf("the ManagedCluster is invalid: clustertemplates.hmc.mirantis.com \"%s\" not found", testTemplateName),
 		},
 		{
+			name: "should fail if the ServiceTemplates are not found in same namespace",
+			managedCluster: managedcluster.NewManagedCluster(
+				managedcluster.WithClusterTemplate(testTemplateName),
+				managedcluster.WithCredential(testCredentialName),
+				managedcluster.WithServiceTemplate(testSvcTemplate1Name),
+			),
+			existingObjects: []runtime.Object{
+				mgmt,
+				cred,
+				template.NewClusterTemplate(
+					template.WithName(testTemplateName),
+					template.WithProvidersStatus(
+						"infrastructure-aws",
+						"control-plane-k0smotron",
+						"bootstrap-k0smotron",
+					),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
+				),
+				template.NewServiceTemplate(
+					template.WithName(testSvcTemplate1Name),
+					template.WithNamespace("othernamespace"),
+				),
+			},
+			err: fmt.Sprintf("the ManagedCluster is invalid: servicetemplates.hmc.mirantis.com \"%s\" not found", testSvcTemplate1Name),
+		},
+		{
 			name: "should fail if the cluster template was found but is invalid (some validation error)",
 			managedCluster: managedcluster.NewManagedCluster(
 				managedcluster.WithClusterTemplate(testTemplateName),
@@ -117,21 +143,55 @@ func TestManagedClusterValidateCreate(t *testing.T) {
 			err: "the ManagedCluster is invalid: the template is not valid: validation error example",
 		},
 		{
-			name: "should succeed",
+			name: "should fail if the service templates were found but are invalid (some validation error)",
 			managedCluster: managedcluster.NewManagedCluster(
 				managedcluster.WithClusterTemplate(testTemplateName),
 				managedcluster.WithCredential(testCredentialName),
+				managedcluster.WithServiceTemplate(testSvcTemplate1Name),
 			),
 			existingObjects: []runtime.Object{
 				mgmt,
 				cred,
 				template.NewClusterTemplate(
 					template.WithName(testTemplateName),
-					template.WithProvidersStatus(v1alpha1.Providers{
+					template.WithProvidersStatus(
 						"infrastructure-aws",
 						"control-plane-k0smotron",
 						"bootstrap-k0smotron",
+					),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
+				),
+				template.NewServiceTemplate(
+					template.WithName(testSvcTemplate1Name),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{
+						Valid:           false,
+						ValidationError: "validation error example",
 					}),
+				),
+			},
+			err: "the ManagedCluster is invalid: the template is not valid: validation error example",
+		},
+		{
+			name: "should succeed",
+			managedCluster: managedcluster.NewManagedCluster(
+				managedcluster.WithClusterTemplate(testTemplateName),
+				managedcluster.WithCredential(testCredentialName),
+				managedcluster.WithServiceTemplate(testSvcTemplate1Name),
+			),
+			existingObjects: []runtime.Object{
+				mgmt,
+				cred,
+				template.NewClusterTemplate(
+					template.WithName(testTemplateName),
+					template.WithProvidersStatus(
+						"infrastructure-aws",
+						"control-plane-k0smotron",
+						"bootstrap-k0smotron",
+					),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
+				),
+				template.NewServiceTemplate(
+					template.WithName(testSvcTemplate1Name),
 					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
 				),
 			},
@@ -170,11 +230,11 @@ func TestManagedClusterValidateCreate(t *testing.T) {
 				mgmt,
 				template.NewClusterTemplate(
 					template.WithName(testTemplateName),
-					template.WithProvidersStatus(v1alpha1.Providers{
+					template.WithProvidersStatus(
 						"infrastructure-aws",
 						"control-plane-k0smotron",
 						"bootstrap-k0smotron",
-					}),
+					),
 					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
 				),
 			},
@@ -190,7 +250,7 @@ func TestManagedClusterValidateCreate(t *testing.T) {
 				mgmt,
 				credential.NewCredential(
 					credential.WithName(testCredentialName),
-					credential.WithState(v1alpha1.CredentialNotFound),
+					credential.WithReady(false),
 					credential.WithIdentityRef(
 						&corev1.ObjectReference{
 							Kind: "AWSClusterStaticIdentity",
@@ -199,11 +259,11 @@ func TestManagedClusterValidateCreate(t *testing.T) {
 				),
 				template.NewClusterTemplate(
 					template.WithName(testTemplateName),
-					template.WithProvidersStatus(v1alpha1.Providers{
+					template.WithProvidersStatus(
 						"infrastructure-aws",
 						"control-plane-k0smotron",
 						"bootstrap-k0smotron",
-					}),
+					),
 					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
 				),
 			},
@@ -226,11 +286,11 @@ func TestManagedClusterValidateCreate(t *testing.T) {
 				),
 				template.NewClusterTemplate(
 					template.WithName(testTemplateName),
-					template.WithProvidersStatus(v1alpha1.Providers{
+					template.WithProvidersStatus(
 						"infrastructure-azure",
 						"control-plane-k0smotron",
 						"bootstrap-k0smotron",
-					}),
+					),
 					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
 				),
 			},
@@ -313,20 +373,20 @@ func TestManagedClusterValidateUpdate(t *testing.T) {
 				template.NewClusterTemplate(
 					template.WithName(testTemplateName),
 					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
-					template.WithProvidersStatus(v1alpha1.Providers{
+					template.WithProvidersStatus(
 						"infrastructure-aws",
 						"control-plane-k0smotron",
 						"bootstrap-k0smotron",
-					}),
+					),
 				),
 				template.NewClusterTemplate(
 					template.WithName(upgradeTargetTemplateName),
 					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
-					template.WithProvidersStatus(v1alpha1.Providers{
+					template.WithProvidersStatus(
 						"infrastructure-aws",
 						"control-plane-k0smotron",
 						"bootstrap-k0smotron",
-					}),
+					),
 				),
 			},
 			warnings: admission.Warnings{fmt.Sprintf("Cluster can't be upgraded from %s to %s. This upgrade sequence is not allowed", testTemplateName, upgradeTargetTemplateName)},
@@ -348,20 +408,20 @@ func TestManagedClusterValidateUpdate(t *testing.T) {
 				template.NewClusterTemplate(
 					template.WithName(testTemplateName),
 					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
-					template.WithProvidersStatus(v1alpha1.Providers{
+					template.WithProvidersStatus(
 						"infrastructure-aws",
 						"control-plane-k0smotron",
 						"bootstrap-k0smotron",
-					}),
+					),
 				),
 				template.NewClusterTemplate(
 					template.WithName(newTemplateName),
 					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
-					template.WithProvidersStatus(v1alpha1.Providers{
+					template.WithProvidersStatus(
 						"infrastructure-aws",
 						"control-plane-k0smotron",
 						"bootstrap-k0smotron",
-					}),
+					),
 				),
 			},
 		},
@@ -386,13 +446,155 @@ func TestManagedClusterValidateUpdate(t *testing.T) {
 						Valid:           false,
 						ValidationError: "validation error example",
 					}),
-					template.WithProvidersStatus(v1alpha1.Providers{
+					template.WithProvidersStatus(
 						"infrastructure-aws",
 						"control-plane-k0smotron",
 						"bootstrap-k0smotron",
+					),
+				),
+			},
+		},
+		{
+			name: "should succeed if serviceTemplates are added",
+			oldManagedCluster: managedcluster.NewManagedCluster(
+				managedcluster.WithClusterTemplate(testTemplateName),
+				managedcluster.WithConfig(`{"foo":"bar"}`),
+				managedcluster.WithCredential(testCredentialName),
+			),
+			newManagedCluster: managedcluster.NewManagedCluster(
+				managedcluster.WithClusterTemplate(testTemplateName),
+				managedcluster.WithConfig(`{"a":"b"}`),
+				managedcluster.WithCredential(testCredentialName),
+				managedcluster.WithServiceTemplate(testSvcTemplate1Name),
+			),
+			existingObjects: []runtime.Object{
+				mgmt,
+				cred,
+				template.NewClusterTemplate(
+					template.WithName(testTemplateName),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{
+						Valid:           false,
+						ValidationError: "validation error example",
+					}),
+					template.WithProvidersStatus(
+						"infrastructure-aws",
+						"control-plane-k0smotron",
+						"bootstrap-k0smotron",
+					),
+				),
+				template.NewServiceTemplate(
+					template.WithName(testSvcTemplate1Name),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
+				),
+			},
+		},
+		{
+			name: "should succeed if serviceTemplates are removed",
+			oldManagedCluster: managedcluster.NewManagedCluster(
+				managedcluster.WithClusterTemplate(testTemplateName),
+				managedcluster.WithConfig(`{"foo":"bar"}`),
+				managedcluster.WithCredential(testCredentialName),
+				managedcluster.WithServiceTemplate(testSvcTemplate1Name),
+			),
+			newManagedCluster: managedcluster.NewManagedCluster(
+				managedcluster.WithClusterTemplate(testTemplateName),
+				managedcluster.WithConfig(`{"a":"b"}`),
+				managedcluster.WithCredential(testCredentialName),
+			),
+			existingObjects: []runtime.Object{
+				mgmt,
+				cred,
+				template.NewClusterTemplate(
+					template.WithName(testTemplateName),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{
+						Valid:           false,
+						ValidationError: "validation error example",
+					}),
+					template.WithProvidersStatus(
+						"infrastructure-aws",
+						"control-plane-k0smotron",
+						"bootstrap-k0smotron",
+					),
+				),
+				template.NewServiceTemplate(
+					template.WithName(testSvcTemplate1Name),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
+				),
+			},
+		},
+		{
+			name: "should fail if serviceTemplates are not in the same namespace",
+			oldManagedCluster: managedcluster.NewManagedCluster(
+				managedcluster.WithClusterTemplate(testTemplateName),
+				managedcluster.WithConfig(`{"foo":"bar"}`),
+				managedcluster.WithCredential(testCredentialName),
+			),
+			newManagedCluster: managedcluster.NewManagedCluster(
+				managedcluster.WithClusterTemplate(testTemplateName),
+				managedcluster.WithConfig(`{"a":"b"}`),
+				managedcluster.WithCredential(testCredentialName),
+				managedcluster.WithServiceTemplate(testSvcTemplate1Name),
+			),
+			existingObjects: []runtime.Object{
+				mgmt,
+				cred,
+				template.NewClusterTemplate(
+					template.WithName(testTemplateName),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{
+						Valid:           false,
+						ValidationError: "validation error example",
+					}),
+					template.WithProvidersStatus(
+						"infrastructure-aws",
+						"control-plane-k0smotron",
+						"bootstrap-k0smotron",
+					),
+				),
+				template.NewServiceTemplate(
+					template.WithName(testSvcTemplate1Name),
+					template.WithNamespace("othernamespace"),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{Valid: true}),
+				),
+			},
+			err: fmt.Sprintf("the ManagedCluster is invalid: servicetemplates.hmc.mirantis.com \"%s\" not found", testSvcTemplate1Name),
+		},
+		{
+			name: "should fail if the ServiceTemplates were found but are invalid",
+			oldManagedCluster: managedcluster.NewManagedCluster(
+				managedcluster.WithClusterTemplate(testTemplateName),
+				managedcluster.WithConfig(`{"foo":"bar"}`),
+				managedcluster.WithCredential(testCredentialName),
+			),
+			newManagedCluster: managedcluster.NewManagedCluster(
+				managedcluster.WithClusterTemplate(testTemplateName),
+				managedcluster.WithConfig(`{"a":"b"}`),
+				managedcluster.WithCredential(testCredentialName),
+				managedcluster.WithServiceTemplate(testSvcTemplate1Name),
+			),
+			existingObjects: []runtime.Object{
+				mgmt,
+				cred,
+				template.NewClusterTemplate(
+					template.WithName(testTemplateName),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{
+						Valid:           false,
+						ValidationError: "validation error example",
+					}),
+					template.WithProvidersStatus(
+						"infrastructure-aws",
+						"control-plane-k0smotron",
+						"bootstrap-k0smotron",
+					),
+				),
+				template.NewServiceTemplate(
+					template.WithName(testSvcTemplate1Name),
+					template.WithValidationStatus(v1alpha1.TemplateValidationStatus{
+						Valid:           false,
+						ValidationError: "validation error example",
 					}),
 				),
 			},
+			err: "the ManagedCluster is invalid: the template is not valid: validation error example",
 		},
 	}
 	for _, tt := range tests {

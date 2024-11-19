@@ -45,22 +45,13 @@ import (
 	"github.com/Mirantis/hmc/internal/utils/status"
 )
 
-// Those are only needed for the initial installation
-var enforcedValues = map[string]any{
-	"controller": map[string]any{
-		"createManagement":         false,
-		"createTemplateManagement": false,
-		"createRelease":            false,
-	},
-}
-
 // ManagementReconciler reconciles a Management object
 type ManagementReconciler struct {
 	client.Client
 	Scheme                   *runtime.Scheme
 	Config                   *rest.Config
-	SystemNamespace          string
 	DynamicClient            *dynamic.DynamicClient
+	SystemNamespace          string
 	CreateTemplateManagement bool
 }
 
@@ -92,99 +83,137 @@ func (r *ManagementReconciler) Update(ctx context.Context, management *hmc.Manag
 
 	if controllerutil.AddFinalizer(management, hmc.ManagementFinalizer) {
 		if err := r.Client.Update(ctx, management); err != nil {
-			l.Error(err, "Failed to update Management finalizers")
+			l.Error(err, "failed to update Management finalizers")
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.ensureTemplateManagement(ctx, management); err != nil {
-		l.Error(err, "Failed to ensure TemplateManagement is created")
+	if err := r.cleanupRemovedComponents(ctx, management); err != nil {
+		l.Error(err, "failed to cleanup removed components")
 		return ctrl.Result{}, err
 	}
 
-	release := &hmc.Release{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: management.Spec.Release}, release); err != nil {
-		l.Error(err, "failed to get Release object")
+	if err := r.ensureTemplateManagement(ctx, management); err != nil {
+		l.Error(err, "failed to ensure TemplateManagement is created")
+		return ctrl.Result{}, err
+	}
+
+	if err := r.enableAdditionalComponents(ctx, management); err != nil { // TODO (zerospiel): i wonder, do we need to reflect these changes and changes from the `wrappedComponents` in the spec?
+		l.Error(err, "failed to enable additional HMC components")
+		return ctrl.Result{}, err
+	}
+
+	components, err := getWrappedComponents(ctx, r.Client, management)
+	if err != nil {
+		l.Error(err, "failed to wrap HMC components")
 		return ctrl.Result{}, err
 	}
 
 	var (
 		errs error
 
-		detectedProviders  = hmc.Providers{}
-		detectedComponents = make(map[string]hmc.ComponentStatus)
-		detectedContracts  = make(map[string]hmc.CompatibilityContracts)
+		statusAccumulator = &mgmtStatusAccumulator{
+			providers:              hmc.Providers{},
+			components:             make(map[string]hmc.ComponentStatus),
+			compatibilityContracts: make(map[string]hmc.CompatibilityContracts),
+		}
 	)
-
-	err := r.enableAdditionalComponents(ctx, management)
-	if err != nil {
-		l.Error(err, "failed to enable additional HMC components")
-		return ctrl.Result{}, err
-	}
-
-	components, err := wrappedComponents(management, release)
-	if err != nil {
-		l.Error(err, "failed to wrap HMC components")
-		return ctrl.Result{}, err
-	}
 	for _, component := range components {
-		template := &hmc.ProviderTemplate{}
-		err := r.Get(ctx, client.ObjectKey{
-			Name: component.Template,
-		}, template)
-		if err != nil {
+		l.V(1).Info("reconciling components", "component", component)
+		template := new(hmc.ProviderTemplate)
+		if err := r.Get(ctx, client.ObjectKey{Name: component.Template}, template); err != nil {
 			errMsg := fmt.Sprintf("Failed to get ProviderTemplate %s: %s", component.Template, err)
-			updateComponentsStatus(detectedComponents, &detectedProviders, detectedContracts, component.helmReleaseName, component.Template, template.Status.Providers, template.Status.CAPIContracts, errMsg)
+			updateComponentsStatus(statusAccumulator, component, nil, errMsg)
 			errs = errors.Join(errs, errors.New(errMsg))
+
 			continue
 		}
+
 		if !template.Status.Valid {
 			errMsg := fmt.Sprintf("Template %s is not marked as valid", component.Template)
-			updateComponentsStatus(detectedComponents, &detectedProviders, detectedContracts, component.helmReleaseName, component.Template, template.Status.Providers, template.Status.CAPIContracts, errMsg)
+			updateComponentsStatus(statusAccumulator, component, nil, errMsg)
 			errs = errors.Join(errs, errors.New(errMsg))
+
 			continue
 		}
 
-		_, _, err = helm.ReconcileHelmRelease(ctx, r.Client, component.helmReleaseName, r.SystemNamespace, helm.ReconcileHelmReleaseOpts{
+		if _, _, err := helm.ReconcileHelmRelease(ctx, r.Client, component.helmReleaseName, r.SystemNamespace, helm.ReconcileHelmReleaseOpts{
 			Values:          component.Config,
 			ChartRef:        template.Status.ChartRef,
 			DependsOn:       component.dependsOn,
 			TargetNamespace: component.targetNamespace,
 			CreateNamespace: component.createNamespace,
-		})
-		if err != nil {
-			errMsg := fmt.Sprintf("error reconciling HelmRelease %s/%s: %s", r.SystemNamespace, component.Template, err)
-			updateComponentsStatus(detectedComponents, &detectedProviders, detectedContracts, component.helmReleaseName, component.Template, template.Status.Providers, template.Status.CAPIContracts, errMsg)
+		}); err != nil {
+			errMsg := fmt.Sprintf("Failed to reconcile HelmRelease %s/%s: %s", r.SystemNamespace, component.helmReleaseName, err)
+			updateComponentsStatus(statusAccumulator, component, nil, errMsg)
 			errs = errors.Join(errs, errors.New(errMsg))
+
 			continue
 		}
 
 		if component.Template != hmc.CoreHMCName {
 			if err := r.checkProviderStatus(ctx, component.Template); err != nil {
-				updateComponentsStatus(detectedComponents, &detectedProviders, detectedContracts, component.helmReleaseName, component.Template, template.Status.Providers, template.Status.CAPIContracts, err.Error())
+				updateComponentsStatus(statusAccumulator, component, nil, fmt.Sprintf("Failed to check provider status: %s", err))
 				errs = errors.Join(errs, err)
 				continue
 			}
 		}
 
-		updateComponentsStatus(detectedComponents, &detectedProviders, detectedContracts, component.helmReleaseName, component.Template, template.Status.Providers, template.Status.CAPIContracts, "")
+		updateComponentsStatus(statusAccumulator, component, template, "")
 	}
 
+	management.Status.AvailableProviders = statusAccumulator.providers
+	management.Status.CAPIContracts = statusAccumulator.compatibilityContracts
+	management.Status.Components = statusAccumulator.components
 	management.Status.ObservedGeneration = management.Generation
-	management.Status.AvailableProviders = detectedProviders
-	management.Status.CAPIContracts = detectedContracts
-	management.Status.Components = detectedComponents
 	management.Status.Release = management.Spec.Release
+
 	if err := r.Status().Update(ctx, management); err != nil {
-		errs = errors.Join(errs, fmt.Errorf("failed to update status for Management %s: %w",
-			management.Name, err))
+		errs = errors.Join(errs, fmt.Errorf("failed to update status for Management %s: %w", management.Name, err))
 	}
+
 	if errs != nil {
 		l.Error(errs, "Multiple errors during Management reconciliation")
 		return ctrl.Result{}, errs
 	}
+
 	return ctrl.Result{}, nil
+}
+
+func (r *ManagementReconciler) cleanupRemovedComponents(ctx context.Context, management *hmc.Management) error {
+	var (
+		errs error
+		l    = ctrl.LoggerFrom(ctx)
+	)
+
+	managedHelmReleases := new(fluxv2.HelmReleaseList)
+	if err := r.Client.List(ctx, managedHelmReleases,
+		client.MatchingLabels{hmc.HMCManagedLabelKey: hmc.HMCManagedLabelValue},
+		client.InNamespace(r.SystemNamespace), // all helmreleases are being installed only in the system namespace
+	); err != nil {
+		return fmt.Errorf("failed to list %s: %w", fluxv2.GroupVersion.WithKind(fluxv2.HelmReleaseKind), err)
+	}
+
+	for _, hr := range managedHelmReleases.Items {
+		componentName := hr.Name // providers(components) names map 1-1 to the helmreleases names
+
+		if componentName == hmc.CoreCAPIName ||
+			componentName == hmc.CoreHMCName ||
+			slices.ContainsFunc(management.Spec.Providers, func(newComp hmc.Provider) bool { return componentName == newComp.Name }) {
+			continue
+		}
+
+		l.Info("Found component to remove", "component_name", componentName)
+
+		if err := r.Client.Delete(ctx, &hr); client.IgnoreNotFound(err) != nil {
+			errs = errors.Join(errs, fmt.Errorf("failed to delete %s: %w", client.ObjectKeyFromObject(&hr), err))
+			continue
+		}
+		l.Info("Removed HelmRelease", "reference", client.ObjectKeyFromObject(&hr).String())
+	}
+
+	return errs
 }
 
 func (r *ManagementReconciler) ensureTemplateManagement(ctx context.Context, mgmt *hmc.Management) error {
@@ -225,7 +254,7 @@ func (r *ManagementReconciler) ensureTemplateManagement(ctx context.Context, mgm
 }
 
 // checkProviderStatus checks the status of a provider associated with a given
-// ProviderTemplate name.  Since there's no way to determine resource Kind from
+// ProviderTemplate name. Since there's no way to determine resource Kind from
 // the given template iterate over all possible provider types.
 func (r *ManagementReconciler) checkProviderStatus(ctx context.Context, providerTemplateName string) error {
 	var errs error
@@ -246,8 +275,7 @@ func (r *ManagementReconciler) checkProviderStatus(ctx context.Context, provider
 			labels.SelectorFromSet(map[string]string{hmc.FluxHelmChartNameKey: providerTemplateName}).String(),
 		)
 		if err != nil {
-			notFoundErr := status.ResourceNotFoundError{}
-			if errors.As(err, &notFoundErr) {
+			if errors.As(err, &status.ResourceNotFoundError{}) {
 				// Check the next resource type.
 				continue
 			}
@@ -263,16 +291,12 @@ func (r *ManagementReconciler) checkProviderStatus(ctx context.Context, provider
 		}
 
 		if len(falseConditionTypes) > 0 {
-			errs = errors.Join(fmt.Errorf("%s: %s is not yet ready, has false conditions: %s",
+			errs = errors.Join(errs, fmt.Errorf("%s: %s is not yet ready, has false conditions: %s",
 				resourceConditions.Name, resourceConditions.Kind, strings.Join(falseConditionTypes, ", ")))
 		}
 	}
 
-	if errs != nil {
-		return errs
-	}
-
-	return nil
+	return errs
 }
 
 func (r *ManagementReconciler) Delete(ctx context.Context, management *hmc.Management) (ctrl.Result, error) {
@@ -361,6 +385,16 @@ func applyHMCDefaults(config *apiextensionsv1.JSON) (*apiextensionsv1.JSON, erro
 			return nil, err
 		}
 	}
+
+	// Those are only needed for the initial installation
+	enforcedValues := map[string]any{
+		"controller": map[string]any{
+			"createManagement":         false,
+			"createTemplateManagement": false,
+			"createRelease":            false,
+		},
+	}
+
 	chartutil.CoalesceTables(values, enforcedValues)
 	raw, err := json.Marshal(values)
 	if err != nil {
@@ -369,10 +403,16 @@ func applyHMCDefaults(config *apiextensionsv1.JSON) (*apiextensionsv1.JSON, erro
 	return &apiextensionsv1.JSON{Raw: raw}, nil
 }
 
-func wrappedComponents(mgmt *hmc.Management, release *hmc.Release) ([]component, error) {
+func getWrappedComponents(ctx context.Context, cl client.Client, mgmt *hmc.Management) ([]component, error) {
 	if mgmt.Spec.Core == nil {
 		return nil, nil
 	}
+
+	release := &hmc.Release{}
+	if err := cl.Get(ctx, client.ObjectKey{Name: mgmt.Spec.Release}, release); err != nil {
+		return nil, fmt.Errorf("failed to get Release %s: %w", mgmt.Spec.Release, err)
+	}
+
 	components := make([]component, 0, len(mgmt.Spec.Providers)+2)
 	hmcComp := component{Component: mgmt.Spec.Core.HMC, helmReleaseName: hmc.CoreHMCName}
 	if hmcComp.Template == "" {
@@ -394,6 +434,8 @@ func wrappedComponents(mgmt *hmc.Management, release *hmc.Release) ([]component,
 	}
 	components = append(components, capiComp)
 
+	const sveltosTargetNamespace = "projectsveltos"
+
 	for _, p := range mgmt.Spec.Providers {
 		c := component{
 			Component: p.Component, helmReleaseName: p.Name,
@@ -405,8 +447,8 @@ func wrappedComponents(mgmt *hmc.Management, release *hmc.Release) ([]component,
 		}
 
 		if p.Name == hmc.ProviderSveltosName {
-			c.targetNamespace = hmc.ProviderSveltosTargetNamespace
-			c.createNamespace = hmc.ProviderSveltosCreateNamespace
+			c.targetNamespace = sveltosTargetNamespace
+			c.createNamespace = true
 		}
 
 		components = append(components, c)
@@ -424,9 +466,8 @@ func (r *ManagementReconciler) enableAdditionalComponents(ctx context.Context, m
 	config := make(map[string]any)
 
 	if hmcComponent.Config != nil {
-		err := json.Unmarshal(hmcComponent.Config.Raw, &config)
-		if err != nil {
-			return fmt.Errorf("failed to unmarshal HMC config into map[string]any: %v", err)
+		if err := json.Unmarshal(hmcComponent.Config.Raw, &config); err != nil {
+			return fmt.Errorf("failed to unmarshal HMC config into map[string]any: %w", err)
 		}
 	}
 
@@ -450,13 +491,15 @@ func (r *ManagementReconciler) enableAdditionalComponents(ctx context.Context, m
 		capiOperatorValues = v
 	}
 
-	err := certmanager.VerifyAPI(ctx, r.Config, r.SystemNamespace)
-	if err != nil {
-		return fmt.Errorf("failed to check in the cert-manager API is installed: %v", err)
-	}
-	l.Info("Cert manager is installed, enabling the HMC admission webhook")
+	if r.Config != nil {
+		if err := certmanager.VerifyAPI(ctx, r.Config, r.SystemNamespace); err != nil {
+			return fmt.Errorf("failed to check in the cert-manager API is installed: %w", err)
+		}
 
-	admissionWebhookValues["enabled"] = true
+		l.Info("Cert manager is installed, enabling the HMC admission webhook")
+		admissionWebhookValues["enabled"] = true
+	}
+
 	config["admissionWebhook"] = admissionWebhookValues
 
 	// Enable HMC capi operator only if it was not explicitly disabled in the config to
@@ -473,37 +516,43 @@ func (r *ManagementReconciler) enableAdditionalComponents(ctx context.Context, m
 
 	updatedConfig, err := json.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("failed to marshal HMC config: %v", err)
+		return fmt.Errorf("failed to marshal HMC config: %w", err)
 	}
-	hmcComponent.Config = &apiextensionsv1.JSON{
-		Raw: updatedConfig,
-	}
+
+	hmcComponent.Config = &apiextensionsv1.JSON{Raw: updatedConfig}
+
 	return nil
 }
 
+type mgmtStatusAccumulator struct {
+	components             map[string]hmc.ComponentStatus
+	compatibilityContracts map[string]hmc.CompatibilityContracts
+	providers              hmc.Providers
+}
+
 func updateComponentsStatus(
-	components map[string]hmc.ComponentStatus,
-	providers *hmc.Providers,
-	capiContracts map[string]hmc.CompatibilityContracts,
-	componentName string,
-	templateName string,
-	templateProviders hmc.Providers,
-	templateContracts hmc.CompatibilityContracts,
+	stAcc *mgmtStatusAccumulator,
+	comp component,
+	template *hmc.ProviderTemplate,
 	err string,
 ) {
-	components[componentName] = hmc.ComponentStatus{
-		Error:    err,
-		Success:  err == "",
-		Template: templateName,
+	if stAcc == nil {
+		return
 	}
 
-	if err == "" {
-		*providers = append(*providers, templateProviders...)
-		slices.Sort(*providers)
-		*providers = slices.Compact(*providers)
+	stAcc.components[comp.helmReleaseName] = hmc.ComponentStatus{
+		Error:    err,
+		Success:  err == "",
+		Template: comp.Component.Template,
+	}
 
-		for _, v := range templateProviders {
-			capiContracts[v] = templateContracts
+	if err == "" && template != nil {
+		stAcc.providers = append(stAcc.providers, template.Status.Providers...)
+		slices.Sort(stAcc.providers)
+		stAcc.providers = slices.Compact(stAcc.providers)
+
+		for _, v := range template.Status.Providers {
+			stAcc.compatibilityContracts[v] = template.Status.CAPIContracts
 		}
 	}
 }
